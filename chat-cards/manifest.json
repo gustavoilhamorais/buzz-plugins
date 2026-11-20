@@ -1,0 +1,10 @@
+{
+  "id": "io.github.gustavoilhamorais.chat-cards",
+  "name": "Chat Cards",
+  "apiVersion": 1,
+  "description": "Shows agent cards (text, fields, tables, charts and buttons) in Buzz messages, using the Chat SDK card format.",
+  "discovery": {
+    "category": "agent-tools",
+    "tags": ["Cards", "Agents", "Chat SDK"]
+  }
+}

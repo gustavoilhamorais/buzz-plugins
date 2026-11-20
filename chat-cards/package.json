@@ -1,0 +1,26 @@
+{
+  "name": "buzz-chat-cards",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.8.0",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "build": "tsc && vite build",
+    "check": "tsc",
+    "test": "node --test \"test/*.test.ts\" \"test/*.test.mjs\""
+  },
+  "devDependencies": {
+    "@buzz/author": "file:vendor/buzz-author-0.0.0-preview.1-89e2d15.tgz",
+    "@json-render/chat": "0.23.2",
+    "@json-render/core": "0.23.2",
+    "@types/react": "19.2.18",
+    "chat": "4.45.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "typescript": "7.0.2",
+    "vite": "8.2.2",
+    "zod": "^4.6.7"
+  }
+}

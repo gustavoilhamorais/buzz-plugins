@@ -1,0 +1,8 @@
+tagline: Agent cards with tables, charts and buttons in Buzz messages
+category: agent-tools
+tags: [cards, agents, chat-sdk, json-render]
+setup:
+  - title: Post a card
+    detail: Send a message with a buzz-card block, as in the README. People without the plugin see the text above it.
+links:
+  docs: https://github.com/gustavoilhamorais/buzz-plugins/tree/main/chat-cards#readme
