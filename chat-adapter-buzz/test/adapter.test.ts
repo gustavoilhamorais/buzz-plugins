@@ -40,6 +40,7 @@ before(async () => {
 });
 
 after(async () => {
+  await chat?.shutdown();
   person.close();
   await relay.stop();
 });
@@ -51,7 +52,7 @@ beforeEach(async () => {
   relay.members = null;
 });
 
-async function startBot(options: { authTag?: string[] } = {}) {
+async function startBot(options: { authTag?: string[]; channels?: string[] } = {}) {
   const adapter = createBuzzAdapter({
     relayUrl: relay.url,
     secretKey: hex(botKey),
@@ -65,8 +66,8 @@ async function startBot(options: { authTag?: string[] } = {}) {
 }
 
 /** Publishes a message as the person, mentioning the bot unless told otherwise. */
-async function say(content: string, options: { root?: string; mention?: boolean } = {}): Promise<Event> {
-  const tags = [["h", CHANNEL]];
+async function say(content: string, options: { root?: string; mention?: boolean; channel?: string } = {}): Promise<Event> {
+  const tags = [["h", options.channel ?? CHANNEL]];
   if (options.root) tags.push(["e", options.root, "", "reply"]);
   if (options.mention !== false) tags.push(["p", bot]);
   const template: EventTemplate = { kind: 9, content, tags, created_at: Math.floor(Date.now() / 1000) };
@@ -232,4 +233,32 @@ test("the adapter's wire format is the plugin's", () => {
   const plugin = readFileSync(new URL("../../chat-cards/src/wire.ts", import.meta.url), "utf8");
   const adapter = readFileSync(new URL("../src/wire.ts", import.meta.url), "utf8");
   assert.equal(adapter, plugin, "copy chat-cards/src/wire.ts to chat-adapter-buzz/src/wire.ts");
+});
+
+const relayKey = generateSecretKey();
+const relaySigned = (kind: number, tags: string[][]) =>
+  finalizeEvent({ kind, content: "", tags, created_at: Math.floor(Date.now() / 1000) }, relayKey);
+
+test("without channels, the bot follows its memberships", async () => {
+  const other = `${CHANNEL}-other`;
+  const later = `${CHANNEL}-later`;
+  relay.inject(relaySigned(39002, [["d", CHANNEL], ["p", user], ["p", bot]]));
+  relay.inject(relaySigned(39002, [["d", other], ["p", user]]));
+  const { chat, adapter } = await startBot({ channels: [] });
+  assert.deepEqual(adapter.listening, [CHANNEL]);
+  const heard: string[] = [];
+  chat.onNewMention(async (_thread, message) => void heard.push(message.text));
+
+  await say("@deploybot here", { channel: other });
+  await say("@deploybot in my channel");
+  await until(() => heard.includes("@deploybot in my channel"), "a mention in a member channel");
+  assert.ok(!heard.includes("@deploybot here"), "channels the bot isn't in are ignored");
+
+  relay.inject(relaySigned(44100, [["p", bot], ["h", later]]));
+  await until(() => adapter.listening.includes(later), "the added channel");
+  await say("@deploybot welcome", { channel: later });
+  await until(() => heard.includes("@deploybot welcome"), "a mention in the added channel");
+
+  relay.inject(relaySigned(44101, [["p", bot], ["h", later]]));
+  await until(() => !adapter.listening.includes(later), "the removed channel");
 });

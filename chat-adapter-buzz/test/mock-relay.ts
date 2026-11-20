@@ -30,6 +30,13 @@ export class MockRelay {
     return relay;
   }
 
+  /** Stores and fans out an event the relay itself signed, such as a membership snapshot. */
+  inject(event: Event): void {
+    this.events.push(event);
+    for (const client of this.clients)
+      for (const [id, filters] of client.subs) if (filters.some((f) => matches(f, event))) this.send(client, ["EVENT", id, event]);
+  }
+
   /** Closes every client connection, as a relay restart would. */
   dropConnections(): void {
     for (const client of this.clients) client.socket.terminate();
@@ -108,7 +115,7 @@ export function matches(filter: Filter, event: Event): boolean {
   for (const [key, values] of Object.entries(filter)) {
     if (!key.startsWith("#") || !Array.isArray(values)) continue;
     const name = key.slice(1);
-    if (!event.tags.some((t) => t[0] === name && values.includes(t[1]))) return false;
+    if (!event.tags.some((t) => t[0] === name && (values as string[]).includes(t[1] ?? ""))) return false;
   }
   return true;
 }

@@ -35,6 +35,9 @@ const KIND_EDIT = 40003;
 const KIND_DELETE = 9005;
 const KIND_REACTION = 7;
 const KIND_TYPING = 20002;
+const KIND_CHANNEL_MEMBERS = 39002;
+const KIND_MEMBER_ADDED = 44100;
+const KIND_MEMBER_REMOVED = 44101;
 const MAX_CONTENT = 64 * 1024;
 const CHANNEL_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const EVENT_ID = /^[0-9a-f]{64}$/;
@@ -45,9 +48,12 @@ export type BuzzThreadId = { channelId: string; rootId?: string };
 export type BuzzAdapterConfig = {
   /** The community's relay, such as `wss://buzz.example.com`. Env: `BUZZ_RELAY_URL`. */
   relayUrl?: string;
-  /** The bot's secret key, as 64 hex characters or `nsec1…`. Env: `BUZZ_SECRET_KEY`. */
+  /** The bot's secret key, as 64 hex characters or `nsec1…`. Env: `BUZZ_PRIVATE_KEY`, as Buzz names it. */
   secretKey?: string;
-  /** Channel ids to listen in. The bot must be a member. Env: `BUZZ_CHANNELS`, comma-separated. */
+  /**
+   * Channel ids to listen in. Env: `BUZZ_CHANNELS`, comma-separated. Leave empty to
+   * follow the bot's channel memberships, as Buzz agents do.
+   */
   channels?: string[];
   /** The bot's NIP-OA `auth` tag from its owner, sent with AUTH. Env: `BUZZ_AUTH_TAG` (JSON array). */
   authTag?: string[];
@@ -71,8 +77,11 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
   readonly name = NAME;
   readonly userName: string;
   readonly botUserId: string;
+  /** The owner named by the NIP-OA tag, if any. */
+  readonly ownerPubkey: string | undefined;
   private readonly secretKey: Uint8Array;
-  private readonly channels: Set<string>;
+  private readonly fixedChannels: string[];
+  private readonly channels = new Set<string>();
   private readonly relay: RelayClient;
   private readonly converter = new BuzzFormatConverter();
   private readonly ownMessages = new Map<string, string>();
@@ -82,19 +91,19 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
 
   constructor(config: BuzzAdapterConfig = {}) {
     const relayUrl = config.relayUrl ?? process.env.BUZZ_RELAY_URL;
-    const secret = config.secretKey ?? process.env.BUZZ_SECRET_KEY;
+    const secret = config.secretKey ?? process.env.BUZZ_PRIVATE_KEY;
     const channels = config.channels ?? process.env.BUZZ_CHANNELS?.split(",").map((c) => c.trim()).filter(Boolean) ?? [];
     const authTag = config.authTag ?? (process.env.BUZZ_AUTH_TAG ? (JSON.parse(process.env.BUZZ_AUTH_TAG) as string[]) : undefined);
     if (!relayUrl) throw new Error("Buzz adapter: set relayUrl or BUZZ_RELAY_URL.");
-    if (!secret) throw new Error("Buzz adapter: set secretKey or BUZZ_SECRET_KEY.");
-    if (!channels.length) throw new Error("Buzz adapter: set channels or BUZZ_CHANNELS to the channel ids the bot listens in.");
+    if (!secret) throw new Error("Buzz adapter: set secretKey or BUZZ_PRIVATE_KEY.");
     for (const channel of channels) if (!CHANNEL_ID.test(channel)) throw new Error(`Buzz adapter: invalid channel id ${channel}.`);
     if (authTag && (authTag.length !== 4 || authTag[0] !== "auth")) throw new Error('Buzz adapter: authTag must be ["auth", owner, conditions, signature].');
 
     this.secretKey = readSecretKey(secret);
     this.botUserId = getPublicKey(this.secretKey);
     this.userName = config.userName ?? "bot";
-    this.channels = new Set(channels);
+    this.fixedChannels = channels;
+    this.ownerPubkey = authTag?.[1];
     this.relay = config.relay ?? new RelayClient({ url: relayUrl, sign: (t) => this.sign(t), ...(authTag ? { authTags: [authTag] } : {}) });
   }
 
@@ -104,9 +113,41 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
     this.chat = chat;
     this.logger = chat.getLogger(NAME);
     await this.relay.connect();
-    const since = Math.floor(Date.now() / 1000);
-    this.relay.subscribe("buzz-adapter", [{ kinds: [KIND_MESSAGE], "#h": [...this.channels], since }], (event) => this.receive(event));
+    if (this.fixedChannels.length) {
+      for (const channel of this.fixedChannels) this.watch(channel);
+    } else {
+      // Membership snapshots name the channels the bot is in; notifications keep the set current.
+      const snapshots = await this.relay.query([{ kinds: [KIND_CHANNEL_MEMBERS], "#p": [this.botUserId] }]);
+      for (const snapshot of snapshots) {
+        const channel = tagValue(snapshot, "d");
+        if (channel) this.watch(channel);
+      }
+      this.relay.subscribe("buzz-membership", [{ kinds: [KIND_MEMBER_ADDED, KIND_MEMBER_REMOVED], "#p": [this.botUserId], since: now() }], (event) => {
+        const channel = tagValue(event, "h");
+        if (!channel) return;
+        if (event.kind === KIND_MEMBER_ADDED) this.watch(channel);
+        else this.unwatch(channel);
+      });
+    }
     this.logger.info(`Listening in ${this.channels.size} Buzz channel(s) as ${this.botUserId}`);
+  }
+
+  /** The channels the bot listens in right now. */
+  get listening(): string[] {
+    return [...this.channels];
+  }
+
+  private watch(channel: string): void {
+    if (!CHANNEL_ID.test(channel) || this.channels.has(channel)) return;
+    this.channels.add(channel);
+    this.relay.subscribe(`ch:${channel}`, [{ kinds: [KIND_MESSAGE], "#h": [channel], since: now() }], (event) => this.receive(event));
+    this.logger?.debug(`Listening in Buzz channel ${channel}`);
+  }
+
+  private unwatch(channel: string): void {
+    if (!this.channels.delete(channel)) return;
+    this.relay.unsubscribe(`ch:${channel}`);
+    this.logger?.debug(`Stopped listening in Buzz channel ${channel}`);
   }
 
   async disconnect(): Promise<void> {

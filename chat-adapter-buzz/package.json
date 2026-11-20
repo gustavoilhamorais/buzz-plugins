@@ -31,7 +31,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "tsc --noEmit",
+    "check": "tsc",
     "test": "node --test \"test/*.test.ts\""
   },
   "peerDependencies": {
