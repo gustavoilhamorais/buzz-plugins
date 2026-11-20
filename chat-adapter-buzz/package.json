@@ -1,0 +1,54 @@
+{
+  "name": "chat-adapter-buzz",
+  "version": "0.1.0",
+  "description": "Buzz adapter for Chat SDK: bots in Buzz channels, with cards rendered by the Chat Cards plugin",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@11.8.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gustavoilhamorais/buzz-plugins.git",
+    "directory": "chat-adapter-buzz"
+  },
+  "keywords": [
+    "chat-sdk",
+    "chat-adapter",
+    "buzz",
+    "nostr",
+    "bot"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "peerDependencies": {
+    "chat": "^4.45.0"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.25.2"
+  },
+  "devDependencies": {
+    "@chat-adapter/state-memory": "4.45.0",
+    "@json-render/chat": "0.23.2",
+    "@json-render/core": "0.23.2",
+    "@types/node": "^24.19.2",
+    "@types/ws": "^8.18.2",
+    "chat": "^4.45.0",
+    "typescript": "7.0.2",
+    "ws": "^8.23.0",
+    "zod": "^4.6.7"
+  }
+}

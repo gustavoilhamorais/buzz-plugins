@@ -45,7 +45,8 @@ export type CardChild =
   | { type: "text_input"; id: string; label: string; placeholder?: string; multiline?: boolean; initialValue?: string };
 export type Card = { type: "card"; title?: string; subtitle?: string; imageUrl?: string; children: CardChild[] };
 
-export type CardAction = { v: 1; message: string; action: string; value?: string };
+/** `values` carries the card's text inputs when the action fired, keyed by input id. */
+export type CardAction = { v: 1; message: string; action: string; value?: string; values?: Record<string, string> };
 
 export type ParsedCard =
   | { status: "ok"; card: Card; before: string; after: string }
@@ -115,6 +116,12 @@ export function parseAction(content: string): (CardAction & { label: string }) |
     if (value.value !== undefined && typeof value.value !== "string") return null;
     const action: CardAction = { v: 1, message: value.message, action: value.action };
     if (value.value !== undefined) action.value = value.value;
+    if (value.values !== undefined) {
+      if (!isRecord(value.values)) return null;
+      const values: Record<string, string> = {};
+      for (const [key, text] of Object.entries(value.values)) if (typeof text === "string") values[key] = str(text);
+      action.values = values;
+    }
     return { ...action, label: block.before };
   } catch {
     return null;

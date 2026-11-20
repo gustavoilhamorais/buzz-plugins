@@ -22,9 +22,16 @@ type Send = (action: string, value: string | undefined, label: string) => Promis
 const SERIES_COLORS = ["var(--chart-series-1)", "var(--chart-series-2)", "var(--chart-series-3)", "var(--chart-series-4)"];
 const color = (i: number) => SERIES_COLORS[i % SERIES_COLORS.length]!;
 
+function inputIds(children: CardChild[]): Extract<CardChild, { type: "text_input" }>[] {
+  return children.flatMap((child) =>
+    child.type === "text_input" ? [child] : child.type === "section" ? inputIds(child.children) : [],
+  );
+}
+
 export function apply(ctx: Context) {
   const React = ctx.react;
-  const { useState, useSyncExternalStore } = React;
+  const { useContext, useRef, useState, useSyncExternalStore } = React;
+  const InputsContext = React.createContext<Record<string, string>>({});
   // Newer hosts expose the shared Markdown renderer; older ones get plain text.
   const Markdown = (ctx.conversation.ui as { Markdown?: ReactTypes.ComponentType<MarkdownProps> }).Markdown;
 
@@ -117,7 +124,7 @@ export function apply(ctx: Context) {
           </div>
         );
       case "text_input":
-        return <TextInputView input={child} send={send} />;
+        return <TextInputView input={child} />;
     }
   }
 
@@ -292,27 +299,27 @@ export function apply(ctx: Context) {
     );
   }
 
-  function TextInputView({ input, send }: { input: Extract<CardChild, { type: "text_input" }>; send: Send | null }) {
-    const sender = useSender(send);
+  // Text inputs have no button of their own: as in Chat SDK, their values
+  // travel with whichever action the person takes on the card.
+  function TextInputView({ input }: { input: Extract<CardChild, { type: "text_input" }> }) {
+    const inputs = useContext(InputsContext);
     const [text, setText] = useState(input.initialValue ?? "");
-    const field = { value: text, placeholder: input.placeholder, onChange: (e: { currentTarget: { value: string } }) => setText(e.currentTarget.value), style: { width: "100%" } };
+    const change = (e: { currentTarget: { value: string } }) => {
+      setText(e.currentTarget.value);
+      inputs[input.id] = e.currentTarget.value;
+    };
+    const field = { value: text, placeholder: input.placeholder, onChange: change, style: { width: "100%" } };
     return (
-      <form style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)" }}
-        onSubmit={(e) => { e.preventDefault(); if (text.trim()) sender.run(input.id, text, `${input.label}: ${text}`); }}>
-        <label>
-          {input.label}
-          {input.multiline ? <textarea rows={3} {...field} /> : <input type="text" {...field} />}
-        </label>
-        <span style={{ display: "flex", gap: "var(--space-1)", alignItems: "center" }}>
-          <button type="submit" disabled={sender.disabled || !text.trim()}>Send</button>
-          <Status state={sender.state} />
-        </span>
-      </form>
+      <label style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)" }}>
+        {input.label}
+        {input.multiline ? <textarea rows={3} {...field} /> : <input type="text" {...field} />}
+      </label>
     );
   }
 
   function CardMessage({ message }: { message: Message }) {
     const session = useSession();
+    const inputs = useRef<Record<string, string>>({}).current;
     const parsed = parseCardMessage(message.content);
     if (!parsed || parsed.status === "invalid") {
       // Keep the author's readable text and say why the card is missing.
@@ -325,18 +332,22 @@ export function apply(ctx: Context) {
         </div>
       );
     }
+    for (const id of inputIds(parsed.card.children)) inputs[id.id] ??= id.initialValue ?? "";
     // The text before the card is its fallback for readers without this plugin.
     const send: Send | null = session
       ? async (action, value, label) => {
-          const content = formatAction({ message: message.id, action, ...(value === undefined ? {} : { value }) }, label);
+          const values = Object.keys(inputs).length ? { ...inputs } : undefined;
+          const content = formatAction({ message: message.id, action, ...(value === undefined ? {} : { value }), ...(values ? { values } : {}) }, label);
           session.messages.reply(message.channelId, message.threadRootId ?? message.id, content, [message.authorId]);
         }
       : null;
     return (
-      <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
-        <CardView card={parsed.card} send={send} />
-        {parsed.after ? <Prose content={parsed.after} /> : null}
-      </div>
+      <InputsContext.Provider value={inputs}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
+          <CardView card={parsed.card} send={send} />
+          {parsed.after ? <Prose content={parsed.after} /> : null}
+        </div>
+      </InputsContext.Provider>
     );
   }
 

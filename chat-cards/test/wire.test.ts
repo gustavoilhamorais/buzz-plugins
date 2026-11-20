@@ -92,3 +92,10 @@ test("actions round-trip and name the card message", () => {
   assert.equal(hasCard(content), false);
   assert.equal(parseAction("```buzz-card-action\n{\"v\":1,\"action\":\"x\"}\n```"), null);
 });
+
+test("an action carries the card's text inputs as values", () => {
+  const content = formatAction({ message: "abc", action: "send", values: { note: "ship it", empty: "" } }, "Send");
+  assert.deepEqual(parseAction(content)?.values, { note: "ship it", empty: "" });
+  const bad = "```buzz-card-action\n" + JSON.stringify({ v: 1, message: "m", action: "a", values: ["x"] }) + "\n```";
+  assert.equal(parseAction(bad), null);
+});

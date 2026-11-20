@@ -83,6 +83,12 @@ function parseAction(content) {
 			action: value.action
 		};
 		if (value.value !== void 0) action.value = value.value;
+		if (value.values !== void 0) {
+			if (!isRecord(value.values)) return null;
+			const values = {};
+			for (const [key, text] of Object.entries(value.values)) if (typeof text === "string") values[key] = str(text);
+			action.values = values;
+		}
 		return {
 			...action,
 			label: block.before
@@ -346,9 +352,13 @@ var SERIES_COLORS = [
 	"var(--chart-series-4)"
 ];
 var color = (i) => SERIES_COLORS[i % SERIES_COLORS.length];
+function inputIds(children) {
+	return children.flatMap((child) => child.type === "text_input" ? [child] : child.type === "section" ? inputIds(child.children) : []);
+}
 function apply(ctx) {
 	const React = ctx.react;
-	const { useState, useSyncExternalStore } = React;
+	const { useContext, useRef, useState, useSyncExternalStore } = React;
+	const InputsContext = React.createContext({});
 	const Markdown = ctx.conversation.ui.Markdown;
 	function useSession() {
 		const snapshot = useSyncExternalStore((listener) => ctx.relay.subscribe(listener), () => ctx.relay.snapshot(), () => ctx.relay.snapshot());
@@ -446,10 +456,7 @@ function apply(ctx) {
 				action,
 				send
 			})));
-			case "text_input": return /* @__PURE__ */ React.createElement(TextInputView, {
-				input: child,
-				send
-			});
+			case "text_input": return /* @__PURE__ */ React.createElement(TextInputView, { input: child });
 		}
 	}
 	function TableView({ table }) {
@@ -705,42 +712,34 @@ function apply(ctx) {
 			value: o.value
 		}, o.label))), /* @__PURE__ */ React.createElement(Status, { state: sender.state }));
 	}
-	function TextInputView({ input, send }) {
-		const sender = useSender(send);
+	function TextInputView({ input }) {
+		const inputs = useContext(InputsContext);
 		const [text, setText] = useState(input.initialValue ?? "");
+		const change = (e) => {
+			setText(e.currentTarget.value);
+			inputs[input.id] = e.currentTarget.value;
+		};
 		const field = {
 			value: text,
 			placeholder: input.placeholder,
-			onChange: (e) => setText(e.currentTarget.value),
+			onChange: change,
 			style: { width: "100%" }
 		};
-		return /* @__PURE__ */ React.createElement("form", {
-			style: {
-				display: "flex",
-				flexDirection: "column",
-				gap: "var(--space-1)"
-			},
-			onSubmit: (e) => {
-				e.preventDefault();
-				if (text.trim()) sender.run(input.id, text, `${input.label}: ${text}`);
-			}
-		}, /* @__PURE__ */ React.createElement("label", null, input.label, input.multiline ? /* @__PURE__ */ React.createElement("textarea", {
+		return /* @__PURE__ */ React.createElement("label", { style: {
+			display: "flex",
+			flexDirection: "column",
+			gap: "var(--space-1)"
+		} }, input.label, input.multiline ? /* @__PURE__ */ React.createElement("textarea", {
 			rows: 3,
 			...field
 		}) : /* @__PURE__ */ React.createElement("input", {
 			type: "text",
 			...field
-		})), /* @__PURE__ */ React.createElement("span", { style: {
-			display: "flex",
-			gap: "var(--space-1)",
-			alignItems: "center"
-		} }, /* @__PURE__ */ React.createElement("button", {
-			type: "submit",
-			disabled: sender.disabled || !text.trim()
-		}, "Send"), /* @__PURE__ */ React.createElement(Status, { state: sender.state })));
+		}));
 	}
 	function CardMessage({ message }) {
 		const session = useSession();
+		const inputs = useRef({}).current;
 		const parsed = parseCardMessage(message.content);
 		if (!parsed || parsed.status === "invalid") return /* @__PURE__ */ React.createElement("div", { style: {
 			display: "flex",
@@ -751,22 +750,25 @@ function apply(ctx) {
 			color: "var(--text-subtle)",
 			fontSize: "var(--text-caption)"
 		} }, "This card can’t be shown. ", parsed?.status === "invalid" ? parsed.reason : ""));
+		for (const id of inputIds(parsed.card.children)) inputs[id.id] ??= id.initialValue ?? "";
 		const send = session ? async (action, value, label) => {
+			const values = Object.keys(inputs).length ? { ...inputs } : void 0;
 			const content = formatAction({
 				message: message.id,
 				action,
-				...value === void 0 ? {} : { value }
+				...value === void 0 ? {} : { value },
+				...values ? { values } : {}
 			}, label);
 			session.messages.reply(message.channelId, message.threadRootId ?? message.id, content, [message.authorId]);
 		} : null;
-		return /* @__PURE__ */ React.createElement("div", { style: {
+		return /* @__PURE__ */ React.createElement(InputsContext.Provider, { value: inputs }, /* @__PURE__ */ React.createElement("div", { style: {
 			display: "flex",
 			flexDirection: "column",
 			gap: "var(--space-2)"
 		} }, /* @__PURE__ */ React.createElement(CardView, {
 			card: parsed.card,
 			send
-		}), parsed.after ? /* @__PURE__ */ React.createElement(Prose, { content: parsed.after }) : null);
+		}), parsed.after ? /* @__PURE__ */ React.createElement(Prose, { content: parsed.after }) : null));
 	}
 	function ActionMessage({ message }) {
 		const action = parseAction(message.content);
