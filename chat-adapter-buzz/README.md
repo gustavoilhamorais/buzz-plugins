@@ -55,18 +55,41 @@ The bot keeps a WebSocket open to the relay. It doesn't use webhooks, so run it 
 | `channels` | `BUZZ_CHANNELS` | Channel ids to listen in, comma-separated in the env. Leave empty to follow the bot's channel memberships, as Buzz agents do |
 | `authTag` | `BUZZ_AUTH_TAG` | Optional NIP-OA `["auth", owner, conditions, signature]` tag from the bot's owner, as a JSON array in the env |
 | `userName` | | The name people mention, `bot` by default |
+| `join` | `BUZZ_JOIN` | Channel ids to join on start when following memberships |
+| `profile` | | `{ name, about, picture }` to publish as the bot's profile on start, with its `auth` tag |
 
 The bot's key must be allowed on the relay. Either enroll it as a member of the community and add it to the channels, or give it a NIP-OA tag signed by a member who owns it. Keep the secret key out of the repository.
 
-## Run it as a Buzz Desktop agent
+## Run it on this computer
 
-`provider/` holds a Buzz Desktop provider, `buzz-backend-chatsdk`. When you create an agent in Buzz Desktop and choose **Run on: chatsdk**, the Desktop generates the agent's key, signs its NIP-OA tag with yours, and hands both to the provider. The provider saves them in a 0600 file under `~/.config/buzz-chatsdk/agents` and starts the bot as a systemd user service, `buzz-chatsdk-<first 16 hex of the pubkey>`.
+`provider/buzz-backend-chatsdk` gives a bot its own key and runs it as a systemd user service, `buzz-chatsdk-<first 16 hex of the pubkey>`. The key is saved in a 0600 file under `~/.config/buzz-chatsdk/agents` and reaches the bot by path.
 
 ```sh
 ln -s "$PWD/provider/buzz-backend-chatsdk.sh" ~/.local/bin/buzz-backend-chatsdk
 ```
 
-The **Bot script** setting picks the bot; it defaults to `examples/card-bot.ts`, which answers mentions with a card and thanks people when they use it. The bot follows the agent's channel memberships and **Respond to** setting, and stops on its owner's `!shutdown`, which is how Buzz Desktop stops a remote agent.
+### Buzz 1.x
+
+```sh
+buzz-backend-chatsdk new Cards wss://<community relay>   # prints the bot's public key
+```
+
+In Buzz, open **Settings → Security → Authorize external identity**, paste the hex public key and copy the ownership proof it signs. Then:
+
+```sh
+buzz-backend-chatsdk authorize <agent> '<ownership proof>'   # checks the proof against the bot's key
+buzz-backend-chatsdk channels <agent>                        # channels the bot can see
+buzz-backend-chatsdk join <agent> <channel id>               # joined on start (kind 9021)
+buzz-backend-chatsdk start <agent> [bot script]
+```
+
+On start the bot authenticates with the proof, publishes a profile carrying it, so Buzz shows the bot as your agent, and joins its channels. The proof has no time or event-kind limit: anyone holding the bot's key can act as your agent. `remove` deletes the key; revoke the bot in Buzz too.
+
+The bot script defaults to `examples/card-bot.ts`, which answers mentions with a card and thanks people when they use it. It answers only its owner unless its config says `"respond_to": "anyone"`, and stops on its owner's `!shutdown`.
+
+### Buzz Desktop 0.5.x
+
+The same file is a remote-agents provider (protocol v1). Create an agent with **Run on: chatsdk**; the Desktop hands over the agent's key and NIP-OA tag in `deploy`, and the provider starts the bot. Deleting the agent there doesn't stop the service (v1 has no undeploy); run `remove`.
 
 ```sh
 buzz-backend-chatsdk list
@@ -75,7 +98,7 @@ buzz-backend-chatsdk stop <agent>
 buzz-backend-chatsdk remove <agent>   # also deletes the saved key
 ```
 
-The provider runs on Linux with systemd. Deleting the agent in Buzz Desktop doesn't stop the service (protocol v1 has no undeploy); run `remove`.
+The service runs on Linux with systemd, while this computer is on.
 
 ## How it maps to Buzz
 

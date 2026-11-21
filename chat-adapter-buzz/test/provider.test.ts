@@ -4,6 +4,9 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { schnorr } from "@noble/curves/secp256k1.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { nsecEncode } from "nostr-tools/nip19";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { RelayClient } from "../src/relay.ts";
@@ -23,6 +26,26 @@ function call(request: unknown) {
   });
   assert.equal(run.status, 0, run.stderr);
   return JSON.parse(run.stdout) as Record<string, unknown>;
+}
+
+/** Runs the CLI without blocking this process, which serves the mock relay. */
+function cli(...args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
+  const child = spawn(process.execPath, [provider, ...args], { env: { ...process.env, BUZZ_CHATSDK_STATE_DIR: state }, stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  let err = "";
+  child.stdout.on("data", (d) => (out += d));
+  child.stderr.on("data", (d) => (err += d));
+  const timer = setTimeout(() => child.kill(), 15_000);
+  return new Promise((resolve) => child.on("close", (code) => {
+    clearTimeout(timer);
+    resolve({ ok: code === 0, out: out.trim(), err: err.trim() });
+  }));
+}
+
+/** What Buzz → Settings → Security → Authorize external identity returns. */
+function ownershipProof(ownerKey: Uint8Array, agent: string): string[] {
+  const sig = schnorr.sign(sha256(utf8ToBytes(`nostr:agent-auth:${agent}:`)), ownerKey);
+  return ["auth", getPublicKey(ownerKey), "", bytesToHex(sig)];
 }
 
 test("info declares protocol 1 and the bot script setting", () => {
@@ -101,6 +124,55 @@ test("the example bot answers a mention with a card, thanks a choice, and stops 
 
     await say("@Cards !shutdown");
     assert.equal(await Promise.race([exited, new Promise((r) => setTimeout(() => r("still running"), 5000))]), 0);
+  } finally {
+    person.close();
+    child.kill();
+    await relay.stop();
+  }
+});
+
+test("Buzz 1.x: a bot with its own key, authorized by its owner, announces itself, joins a channel and answers", async () => {
+  const relay = await MockRelay.start();
+  const ownerKey = generateSecretKey();
+  const channel = "general-1x";
+  relay.inject(finalizeEvent({ kind: 39000, content: "", tags: [["d", channel], ["name", "general"]], created_at: Math.floor(Date.now() / 1000) }, generateSecretKey()));
+
+  const made = await cli("new", "Cards", relay.url);
+  assert.ok(made.ok, made.err);
+  const pubkey = /Public key \(hex\): ([0-9a-f]{64})/.exec(made.out)?.[1];
+  assert.ok(pubkey, made.out);
+  const agent = pubkey.slice(0, 16);
+
+  assert.match((await cli("start", agent)).err, /authorize the bot first/);
+  assert.match((await cli("authorize", agent, JSON.stringify(ownershipProof(ownerKey, getPublicKey(generateSecretKey()))))).err, /different public key/);
+  const proof = ownershipProof(ownerKey, pubkey);
+  assert.ok((await cli("authorize", agent, JSON.stringify(proof))).ok);
+  assert.match((await cli("list")).out, new RegExp(`${agent}\\tCards\\tauthorized`));
+
+  const listed = await cli("channels", agent);
+  assert.ok(listed.ok, listed.err);
+  assert.equal(listed.out, `${channel}\t-\tgeneral`);
+  assert.ok((await cli("join", agent, channel)).ok);
+  assert.equal((await cli("channels", agent)).out, `${channel}\tjoins on start\tgeneral`);
+
+  const config = join(state, "agents", `${agent}.json`);
+  const child: ChildProcess = spawn(process.execPath, [bot], { env: { ...process.env, BUZZ_AGENT_CONFIG: config }, stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout!.on("data", (d) => (output += d));
+  child.stderr!.on("data", (d) => (output += d));
+  const person = new RelayClient({ url: relay.url, sign: (t) => finalizeEvent(t, ownerKey), timeoutMs: 3000 });
+  try {
+    await until(() => output.includes("is listening"), "the bot to start", () => output);
+    assert.deepEqual(relay.auths.find((e) => e.pubkey === pubkey)?.tags.find((t) => t[0] === "auth"), proof);
+    const profile = relay.events.find((e) => e.pubkey === pubkey && e.kind === 0);
+    assert.deepEqual(profile?.tags, [proof]);
+    assert.equal(JSON.parse(profile!.content).name, "Cards");
+    assert.ok(relay.events.some((e) => e.pubkey === pubkey && e.kind === 9021 && e.tags.some((t) => t[0] === "h" && t[1] === channel)));
+
+    await person.connect();
+    await person.publish(finalizeEvent({ kind: 9, content: "@Cards oi", tags: [["h", channel], ["p", pubkey]], created_at: Math.floor(Date.now() / 1000) }, ownerKey));
+    const card = await until(() => relay.events.find((e) => e.pubkey === pubkey && e.kind === 9), "the card", () => output);
+    assert.equal(parseCardMessage(card.content)?.status, "ok");
   } finally {
     person.close();
     child.kill();

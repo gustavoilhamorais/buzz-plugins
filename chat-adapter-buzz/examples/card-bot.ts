@@ -17,6 +17,10 @@ type AgentConfig = {
   auth_tag?: string;
   respond_to?: "anyone" | "owner-only" | "allowlist";
   respond_to_allowlist?: string[];
+  /** Channel ids to join on start. */
+  join?: string[];
+  /** Set for a bot with its own key (Buzz 1.x), which has no profile until it publishes one. */
+  publish_profile?: boolean;
 };
 
 const config: AgentConfig = process.env.BUZZ_AGENT_CONFIG
@@ -33,6 +37,8 @@ const adapter = createBuzzAdapter({
   secretKey: config.private_key_nsec,
   ...(config.auth_tag ? { authTag: JSON.parse(config.auth_tag) as string[] } : {}),
   userName: name,
+  ...(config.join?.length ? { join: config.join } : {}),
+  ...(config.publish_profile ? { profile: { name, about: "Responde menções com um card do Chat SDK." } } : {}),
 });
 const owner = adapter.ownerPubkey;
 

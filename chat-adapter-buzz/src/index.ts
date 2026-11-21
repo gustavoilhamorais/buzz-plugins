@@ -35,6 +35,9 @@ const KIND_EDIT = 40003;
 const KIND_DELETE = 9005;
 const KIND_REACTION = 7;
 const KIND_TYPING = 20002;
+const KIND_PROFILE = 0;
+const KIND_JOIN_REQUEST = 9021;
+const KIND_CHANNEL_METADATA = 39000;
 const KIND_CHANNEL_MEMBERS = 39002;
 const KIND_MEMBER_ADDED = 44100;
 const KIND_MEMBER_REMOVED = 44101;
@@ -59,6 +62,13 @@ export type BuzzAdapterConfig = {
   authTag?: string[];
   /** The name people use to mention the bot. Defaults to `bot`. */
   userName?: string;
+  /**
+   * Publishes the bot's profile (kind 0) on start, with its `auth` tag so Buzz
+   * shows it as its owner's agent. Leave out to keep the profile as it is.
+   */
+  profile?: { name?: string; about?: string; picture?: string };
+  /** Channel ids the bot joins on start (kind 9021) if it isn't a member yet. Env: `BUZZ_JOIN`, comma-separated. */
+  join?: string[];
   /** Overrides the relay client, for tests. */
   relay?: RelayClient;
 };
@@ -81,6 +91,9 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
   readonly ownerPubkey: string | undefined;
   private readonly secretKey: Uint8Array;
   private readonly fixedChannels: string[];
+  private readonly join: string[];
+  private readonly authTag: string[] | undefined;
+  private readonly profile: BuzzAdapterConfig["profile"];
   private readonly channels = new Set<string>();
   private readonly relay: RelayClient;
   private readonly converter = new BuzzFormatConverter();
@@ -96,13 +109,17 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
     const authTag = config.authTag ?? (process.env.BUZZ_AUTH_TAG ? (JSON.parse(process.env.BUZZ_AUTH_TAG) as string[]) : undefined);
     if (!relayUrl) throw new Error("Buzz adapter: set relayUrl or BUZZ_RELAY_URL.");
     if (!secret) throw new Error("Buzz adapter: set secretKey or BUZZ_PRIVATE_KEY.");
-    for (const channel of channels) if (!CHANNEL_ID.test(channel)) throw new Error(`Buzz adapter: invalid channel id ${channel}.`);
+    const join = config.join ?? process.env.BUZZ_JOIN?.split(",").map((c) => c.trim()).filter(Boolean) ?? [];
+    for (const channel of [...channels, ...join]) if (!CHANNEL_ID.test(channel)) throw new Error(`Buzz adapter: invalid channel id ${channel}.`);
     if (authTag && (authTag.length !== 4 || authTag[0] !== "auth")) throw new Error('Buzz adapter: authTag must be ["auth", owner, conditions, signature].');
 
     this.secretKey = readSecretKey(secret);
     this.botUserId = getPublicKey(this.secretKey);
     this.userName = config.userName ?? "bot";
     this.fixedChannels = channels;
+    this.join = join;
+    this.authTag = authTag;
+    this.profile = config.profile;
     this.ownerPubkey = authTag?.[1];
     this.relay = config.relay ?? new RelayClient({ url: relayUrl, sign: (t) => this.sign(t), ...(authTag ? { authTags: [authTag] } : {}) });
   }
@@ -113,6 +130,7 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
     this.chat = chat;
     this.logger = chat.getLogger(NAME);
     await this.relay.connect();
+    if (this.profile) await this.publishProfile(this.profile);
     if (this.fixedChannels.length) {
       for (const channel of this.fixedChannels) this.watch(channel);
     } else {
@@ -122,6 +140,12 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
         const channel = tagValue(snapshot, "d");
         if (channel) this.watch(channel);
       }
+      for (const channel of this.join) {
+        if (this.channels.has(channel)) continue;
+        await this.relay.publish(this.sign({ kind: KIND_JOIN_REQUEST, content: "", tags: [["h", channel]], created_at: now() }));
+        this.logger.info(`Joined Buzz channel ${channel}`);
+        this.watch(channel);
+      }
       this.relay.subscribe("buzz-membership", [{ kinds: [KIND_MEMBER_ADDED, KIND_MEMBER_REMOVED], "#p": [this.botUserId], since: now() }], (event) => {
         const channel = tagValue(event, "h");
         if (!channel) return;
@@ -130,6 +154,32 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
       });
     }
     this.logger.info(`Listening in ${this.channels.size} Buzz channel(s) as ${this.botUserId}`);
+  }
+
+  /** Channels the bot can see, with whether it's a member. Needs a connected relay. */
+  async listChannels(): Promise<{ id: string; name: string; member: boolean }[]> {
+    const [metadata, memberships] = await Promise.all([
+      this.relay.query([{ kinds: [KIND_CHANNEL_METADATA] }]),
+      this.relay.query([{ kinds: [KIND_CHANNEL_MEMBERS], "#p": [this.botUserId] }]),
+    ]);
+    const mine = new Set(memberships.map((e) => tagValue(e, "d")));
+    const byId = new Map<string, { id: string; name: string; member: boolean }>();
+    for (const event of metadata.sort((a, b) => a.created_at - b.created_at)) {
+      const id = tagValue(event, "d");
+      if (id && CHANNEL_ID.test(id)) byId.set(id, { id, name: tagValue(event, "name") ?? id, member: mine.has(id) });
+    }
+    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Connects without a Chat instance, for tools that only list channels. */
+  async connect(): Promise<void> {
+    await this.relay.connect();
+  }
+
+  private async publishProfile(profile: NonNullable<BuzzAdapterConfig["profile"]>): Promise<void> {
+    const name = profile.name ?? this.userName;
+    const content = JSON.stringify({ name, display_name: name, ...(profile.about ? { about: profile.about } : {}), ...(profile.picture ? { picture: profile.picture } : {}), bot: true });
+    await this.relay.publish(this.sign({ kind: KIND_PROFILE, content, tags: this.authTag ? [this.authTag] : [], created_at: now() }));
   }
 
   /** The channels the bot listens in right now. */
