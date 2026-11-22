@@ -1,14 +1,16 @@
 // A Buzz agent that answers mentions with a card and updates the card when
-// someone uses it. Run it from the chatsdk provider, or by hand with:
+// someone uses it. It runs three ways:
 //
-//   BUZZ_RELAY_URL=wss://… BUZZ_PRIVATE_KEY=nsec1… BUZZ_AUTH_TAG='["auth",…]' node examples/card-bot.ts
-//
-// With BUZZ_AGENT_CONFIG set, it reads the identity the provider saved instead.
+//   - Inside Buzz 1.x, started by the Chat SDK plugin (BUZZ_HOST=stdio): Buzz
+//     signs and publishes as the agent.
+//   - From the chatsdk provider, with BUZZ_AGENT_CONFIG naming its saved identity.
+//   - By hand: BUZZ_RELAY_URL=wss://… BUZZ_PRIVATE_KEY=nsec1… BUZZ_AUTH_TAG='["auth",…]' node examples/card-bot.ts
 
 import { readFileSync } from "node:fs";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import { Chat, type Message, type Thread } from "chat";
 import { createBuzzAdapter } from "../src/index.ts";
+import { connectStdioHost } from "../src/stdio.ts";
 
 type AgentConfig = {
   name?: string;
@@ -23,23 +25,28 @@ type AgentConfig = {
   publish_profile?: boolean;
 };
 
-const config: AgentConfig = process.env.BUZZ_AGENT_CONFIG
-  ? (JSON.parse(readFileSync(process.env.BUZZ_AGENT_CONFIG, "utf8")) as AgentConfig)
-  : {
-      relay_url: process.env.BUZZ_RELAY_URL ?? "",
-      private_key_nsec: process.env.BUZZ_PRIVATE_KEY ?? "",
-      ...(process.env.BUZZ_AUTH_TAG ? { auth_tag: process.env.BUZZ_AUTH_TAG } : {}),
-    };
+const host = process.env.BUZZ_HOST === "stdio" ? await connectStdioHost() : null;
+const config: AgentConfig = host
+  ? { name: host.name ?? "Cards", relay_url: "", private_key_nsec: "", respond_to: process.env.BUZZ_RESPOND_TO === "anyone" ? "anyone" : "owner-only" }
+  : process.env.BUZZ_AGENT_CONFIG
+    ? (JSON.parse(readFileSync(process.env.BUZZ_AGENT_CONFIG, "utf8")) as AgentConfig)
+    : {
+        relay_url: process.env.BUZZ_RELAY_URL ?? "",
+        private_key_nsec: process.env.BUZZ_PRIVATE_KEY ?? "",
+        ...(process.env.BUZZ_AUTH_TAG ? { auth_tag: process.env.BUZZ_AUTH_TAG } : {}),
+      };
 const name = config.name ?? "Cards";
 
-const adapter = createBuzzAdapter({
-  relayUrl: config.relay_url,
-  secretKey: config.private_key_nsec,
-  ...(config.auth_tag ? { authTag: JSON.parse(config.auth_tag) as string[] } : {}),
-  userName: name,
-  ...(config.join?.length ? { join: config.join } : {}),
-  ...(config.publish_profile ? { profile: { name, about: "Responde menções com um card do Chat SDK." } } : {}),
-});
+const adapter = host
+  ? createBuzzAdapter({ host, userName: name })
+  : createBuzzAdapter({
+      relayUrl: config.relay_url,
+      secretKey: config.private_key_nsec,
+      ...(config.auth_tag ? { authTag: JSON.parse(config.auth_tag) as string[] } : {}),
+      userName: name,
+      ...(config.join?.length ? { join: config.join } : {}),
+      ...(config.publish_profile ? { profile: { name, about: "Responde menções com um card do Chat SDK." } } : {}),
+    });
 const owner = adapter.ownerPubkey;
 
 const chat = new Chat({ userName: name, adapters: { buzz: adapter }, state: createMemoryState(), logger: "info" });
@@ -119,5 +126,6 @@ chat.onAction("feedback", async (event) => {
 await chat.initialize();
 console.log(`${name} is listening as ${adapter.botUserId} in ${adapter.listening.length} channel(s)`);
 
-for (const signal of ["SIGINT", "SIGTERM"] as const)
-  process.on(signal, () => void chat.shutdown().finally(() => process.exit(0)));
+const stop = () => void chat.shutdown().finally(() => process.exit(0));
+for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, stop);
+host?.onStop(stop);

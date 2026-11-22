@@ -1,0 +1,13 @@
+{
+  "id": "io.github.gustavoilhamorais.chat-sdk-agents",
+  "name": "Chat SDK agents",
+  "apiVersion": 1,
+  "description": "Run Chat SDK bots as Buzz agents. Buzz keeps the agent's key and community sign-in; the bot gets the messages that mention it and posts through Buzz.",
+  "discovery": {
+    "category": "agents",
+    "tags": ["agents", "chat-sdk", "cards"]
+  },
+  "host": {
+    "processes": [{ "id": "bot", "program": "node" }]
+  }
+}

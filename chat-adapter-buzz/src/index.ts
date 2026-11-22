@@ -27,6 +27,7 @@ import { RelayClient } from "./relay.ts";
 import { formatCardMessage, parseAction, type Card, type CardAction } from "./wire.ts";
 
 export { RelayClient, RelayError } from "./relay.ts";
+export { connectStdioHost, StdioHost } from "./stdio.ts";
 export { formatAction, formatCardMessage, parseAction, parseCardMessage } from "./wire.ts";
 
 const NAME = "buzz";
@@ -47,6 +48,25 @@ const EVENT_ID = /^[0-9a-f]{64}$/;
 const PROFILE_TTL_MS = 10 * 60_000;
 
 export type BuzzThreadId = { channelId: string; rootId?: string };
+
+/** An unsigned event for the host to sign as the agent. */
+export type BuzzEventTemplate = { kind: number; content: string; tags: string[][] };
+
+/**
+ * Buzz itself, when Buzz runs the bot as one of its agents (Buzz 1.x). Buzz holds
+ * the agent's key and its community sign-in, signs and publishes what the bot
+ * sends and reads as the agent, and delivers the messages that mention it.
+ */
+export interface BuzzHost {
+  readonly pubkey: string;
+  /** The agent's owner. */
+  readonly owner?: string;
+  publish(template: BuzzEventTemplate): Promise<Event>;
+  query(filters: Filter[]): Promise<Event[]>;
+  /** Calls `listener` with each message Buzz delivers to the agent. */
+  onEvent(listener: (event: Event) => void): void;
+  close?(): void;
+}
 
 export type BuzzAdapterConfig = {
   /** The community's relay, such as `wss://buzz.example.com`. Env: `BUZZ_RELAY_URL`. */
@@ -71,6 +91,8 @@ export type BuzzAdapterConfig = {
   join?: string[];
   /** Overrides the relay client, for tests. */
   relay?: RelayClient;
+  /** Runs inside Buzz as one of its agents. Replaces relayUrl, secretKey, authTag, channels and join. */
+  host?: BuzzHost;
 };
 
 class BuzzFormatConverter extends BaseFormatConverter {
@@ -89,13 +111,14 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
   readonly botUserId: string;
   /** The owner named by the NIP-OA tag, if any. */
   readonly ownerPubkey: string | undefined;
-  private readonly secretKey: Uint8Array;
+  private readonly secretKey: Uint8Array | null;
+  private readonly host: BuzzHost | null;
   private readonly fixedChannels: string[];
   private readonly join: string[];
   private readonly authTag: string[] | undefined;
   private readonly profile: BuzzAdapterConfig["profile"];
   private readonly channels = new Set<string>();
-  private readonly relay: RelayClient;
+  private readonly relay: RelayClient | null;
   private readonly converter = new BuzzFormatConverter();
   private readonly ownMessages = new Map<string, string>();
   private readonly profiles = new Map<string, { info: UserInfo; at: number }>();
@@ -103,6 +126,20 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
   private logger: Logger | null = null;
 
   constructor(config: BuzzAdapterConfig = {}) {
+    this.userName = config.userName ?? "bot";
+    this.profile = config.profile;
+    if (config.host) {
+      this.host = config.host;
+      this.secretKey = null;
+      this.relay = null;
+      this.botUserId = config.host.pubkey;
+      this.ownerPubkey = config.host.owner;
+      this.fixedChannels = [];
+      this.join = [];
+      this.authTag = undefined;
+      return;
+    }
+    this.host = null;
     const relayUrl = config.relayUrl ?? process.env.BUZZ_RELAY_URL;
     const secret = config.secretKey ?? process.env.BUZZ_PRIVATE_KEY;
     const channels = config.channels ?? process.env.BUZZ_CHANNELS?.split(",").map((c) => c.trim()).filter(Boolean) ?? [];
@@ -115,11 +152,9 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
 
     this.secretKey = readSecretKey(secret);
     this.botUserId = getPublicKey(this.secretKey);
-    this.userName = config.userName ?? "bot";
     this.fixedChannels = channels;
     this.join = join;
     this.authTag = authTag;
-    this.profile = config.profile;
     this.ownerPubkey = authTag?.[1];
     this.relay = config.relay ?? new RelayClient({ url: relayUrl, sign: (t) => this.sign(t), ...(authTag ? { authTags: [authTag] } : {}) });
   }
@@ -129,24 +164,30 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
   async initialize(chat: ChatInstance): Promise<void> {
     this.chat = chat;
     this.logger = chat.getLogger(NAME);
-    await this.relay.connect();
+    if (this.host) {
+      // Buzz delivers what mentions the agent, in whichever channel.
+      this.host.onEvent((event) => this.receive(event));
+      this.logger.info(`Running as Buzz agent ${this.botUserId}`);
+      return;
+    }
+    await this.relay!.connect();
     if (this.profile) await this.publishProfile(this.profile);
     if (this.fixedChannels.length) {
       for (const channel of this.fixedChannels) this.watch(channel);
     } else {
       // Membership snapshots name the channels the bot is in; notifications keep the set current.
-      const snapshots = await this.relay.query([{ kinds: [KIND_CHANNEL_MEMBERS], "#p": [this.botUserId] }]);
+      const snapshots = await this.relay!.query([{ kinds: [KIND_CHANNEL_MEMBERS], "#p": [this.botUserId] }]);
       for (const snapshot of snapshots) {
         const channel = tagValue(snapshot, "d");
         if (channel) this.watch(channel);
       }
       for (const channel of this.join) {
         if (this.channels.has(channel)) continue;
-        await this.relay.publish(this.sign({ kind: KIND_JOIN_REQUEST, content: "", tags: [["h", channel]], created_at: now() }));
+        await this.publish({ kind: KIND_JOIN_REQUEST, content: "", tags: [["h", channel]] });
         this.logger.info(`Joined Buzz channel ${channel}`);
         this.watch(channel);
       }
-      this.relay.subscribe("buzz-membership", [{ kinds: [KIND_MEMBER_ADDED, KIND_MEMBER_REMOVED], "#p": [this.botUserId], since: now() }], (event) => {
+      this.relay!.subscribe("buzz-membership", [{ kinds: [KIND_MEMBER_ADDED, KIND_MEMBER_REMOVED], "#p": [this.botUserId], since: now() }], (event) => {
         const channel = tagValue(event, "h");
         if (!channel) return;
         if (event.kind === KIND_MEMBER_ADDED) this.watch(channel);
@@ -159,8 +200,8 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
   /** Channels the bot can see, with whether it's a member. Needs a connected relay. */
   async listChannels(): Promise<{ id: string; name: string; member: boolean }[]> {
     const [metadata, memberships] = await Promise.all([
-      this.relay.query([{ kinds: [KIND_CHANNEL_METADATA] }]),
-      this.relay.query([{ kinds: [KIND_CHANNEL_MEMBERS], "#p": [this.botUserId] }]),
+      this.query([{ kinds: [KIND_CHANNEL_METADATA] }]),
+      this.query([{ kinds: [KIND_CHANNEL_MEMBERS], "#p": [this.botUserId] }]),
     ]);
     const mine = new Set(memberships.map((e) => tagValue(e, "d")));
     const byId = new Map<string, { id: string; name: string; member: boolean }>();
@@ -173,13 +214,13 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
 
   /** Connects without a Chat instance, for tools that only list channels. */
   async connect(): Promise<void> {
-    await this.relay.connect();
+    await this.relay?.connect();
   }
 
   private async publishProfile(profile: NonNullable<BuzzAdapterConfig["profile"]>): Promise<void> {
     const name = profile.name ?? this.userName;
     const content = JSON.stringify({ name, display_name: name, ...(profile.about ? { about: profile.about } : {}), ...(profile.picture ? { picture: profile.picture } : {}), bot: true });
-    await this.relay.publish(this.sign({ kind: KIND_PROFILE, content, tags: this.authTag ? [this.authTag] : [], created_at: now() }));
+    await this.publish({ kind: KIND_PROFILE, content, tags: this.authTag ? [this.authTag] : [] });
   }
 
   /** The channels the bot listens in right now. */
@@ -190,18 +231,19 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
   private watch(channel: string): void {
     if (!CHANNEL_ID.test(channel) || this.channels.has(channel)) return;
     this.channels.add(channel);
-    this.relay.subscribe(`ch:${channel}`, [{ kinds: [KIND_MESSAGE], "#h": [channel], since: now() }], (event) => this.receive(event));
+    this.relay!.subscribe(`ch:${channel}`, [{ kinds: [KIND_MESSAGE], "#h": [channel], since: now() }], (event) => this.receive(event));
     this.logger?.debug(`Listening in Buzz channel ${channel}`);
   }
 
   private unwatch(channel: string): void {
     if (!this.channels.delete(channel)) return;
-    this.relay.unsubscribe(`ch:${channel}`);
+    this.relay!.unsubscribe(`ch:${channel}`);
     this.logger?.debug(`Stopped listening in Buzz channel ${channel}`);
   }
 
   async disconnect(): Promise<void> {
-    this.relay.close();
+    this.relay?.close();
+    this.host?.close?.();
   }
 
   async handleWebhook(): Promise<Response> {
@@ -234,7 +276,7 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
   private receive(event: Event): void {
     if (!this.chat || event.pubkey === this.botUserId || event.kind !== KIND_MESSAGE) return;
     const channelId = tagValue(event, "h");
-    if (!channelId || !this.channels.has(channelId)) return;
+    if (!channelId || !CHANNEL_ID.test(channelId) || (!this.host && !this.channels.has(channelId))) return;
     const threadId = this.encodeThreadId({ channelId, rootId: threadRoot(event) ?? event.id });
     const action = parseAction(event.content);
     if (action) {
@@ -250,7 +292,7 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
     if (!EVENT_ID.test(action.message)) return;
     let cardChannel = this.ownMessages.get(action.message);
     if (!cardChannel) {
-      const [card] = await this.relay.query([{ ids: [action.message], authors: [this.botUserId], limit: 1 }]);
+      const [card] = await this.query([{ ids: [action.message], authors: [this.botUserId], limit: 1 }]);
       cardChannel = card ? tagValue(card, "h") : undefined;
     }
     if (cardChannel !== channelId) {
@@ -329,7 +371,8 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
 
   async deleteMessage(threadId: string, messageId: string): Promise<void> {
     const { channelId } = this.decodeThreadId(threadId);
-    await this.publish({ kind: KIND_DELETE, content: "", tags: [["h", channelId], ["e", messageId]] });
+    // An agent in Buzz deletes its own messages with NIP-09; group deletes are for admins.
+    await this.publish({ kind: this.host ? 5 : KIND_DELETE, content: "", tags: [["h", channelId], ["e", messageId]] });
     this.ownMessages.delete(messageId);
   }
 
@@ -339,7 +382,7 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
 
   async removeReaction(_threadId: string, messageId: string, emoji: EmojiValue | string): Promise<void> {
     const content = emojiText(emoji);
-    const mine = await this.relay.query([{ kinds: [KIND_REACTION], authors: [this.botUserId], "#e": [messageId] }]);
+    const mine = await this.query([{ kinds: [KIND_REACTION], authors: [this.botUserId], "#e": [messageId] }]);
     const targets = mine.filter((r) => r.content === content);
     if (targets.length) await this.publish({ kind: 5, content: "", tags: targets.map((r) => ["e", r.id]) });
   }
@@ -348,7 +391,8 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
     const { channelId, rootId } = this.decodeThreadId(threadId);
     const tags = [["h", channelId]];
     if (rootId) tags.push(["e", rootId, "", "reply"]);
-    await this.relay.publishQuietly(this.sign({ kind: KIND_TYPING, content: "", tags, created_at: now() }));
+    if (this.host) await this.host.publish({ kind: KIND_TYPING, content: "", tags }).catch(() => undefined);
+    else this.relay!.publishQuietly(this.sign({ kind: KIND_TYPING, content: "", tags, created_at: now() }));
   }
 
   renderFormatted(content: FormattedContent): string {
@@ -373,7 +417,7 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
   }
 
   async fetchMessage(threadId: string, messageId: string): Promise<Message<Event> | null> {
-    const [event] = await this.relay.query([{ ids: [messageId], kinds: [KIND_MESSAGE], limit: 1 }]);
+    const [event] = await this.query([{ ids: [messageId], kinds: [KIND_MESSAGE], limit: 1 }]);
     if (!event) return null;
     const [message] = await this.withEdits([event], threadId);
     return message ?? null;
@@ -388,7 +432,7 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
     if (cursor !== undefined) forward ? (page.since = cursor) : (page.until = cursor);
     const filters: Filter[] = rootId ? [{ ...page, "#e": [rootId] }] : [page];
     if (rootId && (cursor === undefined || !forward)) filters.push({ ids: [rootId], limit: 1 });
-    const events = dedupe(await this.relay.query(filters))
+    const events = dedupe(await this.query(filters))
       .filter((e) => (rootId ? e.id === rootId || threadRoot(e) === rootId : !threadRoot(e)))
       .filter((e) => cursor === undefined || (forward ? e.created_at > cursor : e.created_at < cursor))
       .sort((a, b) => sentAt(a) - sentAt(b) || (a.id === rootId ? -1 : b.id === rootId ? 1 : 0));
@@ -402,7 +446,7 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
   private async withEdits(events: Event[], threadId: string): Promise<Message<Event>[]> {
     if (!events.length) return [];
     const ids = events.map((e) => e.id);
-    const changes = await this.relay.query([{ kinds: [KIND_EDIT, KIND_DELETE, 5], "#e": ids }]);
+    const changes = await this.query([{ kinds: [KIND_EDIT, KIND_DELETE, 5], "#e": ids }]);
     const authorOf = new Map(events.map((e) => [e.id, e.pubkey]));
     const edits = new Map<string, Event>();
     const deleted = new Set<string>();
@@ -426,7 +470,7 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
     if (!EVENT_ID.test(userId)) return null;
     const cached = this.profiles.get(userId);
     if (cached && Date.now() - cached.at < PROFILE_TTL_MS) return cached.info;
-    const [profile] = (await this.relay.query([{ kinds: [0], authors: [userId], limit: 1 }])).sort((a, b) => b.created_at - a.created_at);
+    const [profile] = (await this.query([{ kinds: [0], authors: [userId], limit: 1 }])).sort((a, b) => b.created_at - a.created_at);
     let fields: Record<string, unknown> = {};
     try {
       fields = profile ? (JSON.parse(profile.content) as Record<string, unknown>) : {};
@@ -452,13 +496,18 @@ export class BuzzAdapter implements Adapter<BuzzThreadId, Event> {
   // --- signing -------------------------------------------------------------
 
   private sign(template: Omit<EventTemplate, "created_at"> & { created_at?: number }): Event {
-    return finalizeEvent({ created_at: now(), ...template }, this.secretKey);
+    return finalizeEvent({ created_at: now(), ...template }, this.secretKey!);
   }
 
-  private async publish(template: Omit<EventTemplate, "created_at">): Promise<Event> {
+  private async publish(template: BuzzEventTemplate): Promise<Event> {
+    if (this.host) return this.host.publish(template);
     const event = this.sign(template);
-    await this.relay.publish(event);
+    await this.relay!.publish(event);
     return event;
+  }
+
+  private query(filters: Filter[]): Promise<Event[]> {
+    return this.host ? this.host.query(filters) : this.relay!.query(filters);
   }
 
   private rememberOwn(id: string, channelId: string): void {

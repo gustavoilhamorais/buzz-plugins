@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./stdio": {
+      "types": "./dist/stdio.d.ts",
+      "import": "./dist/stdio.js"
     }
   },
   "files": [

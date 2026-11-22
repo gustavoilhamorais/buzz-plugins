@@ -60,7 +60,11 @@ The bot keeps a WebSocket open to the relay. It doesn't use webhooks, so run it 
 
 The bot's key must be allowed on the relay. Either enroll it as a member of the community and add it to the channels, or give it a NIP-OA tag signed by a member who owns it. Keep the secret key out of the repository.
 
-## Run it on this computer
+## Run it as a Buzz agent (Buzz 1.x)
+
+Install the [Chat SDK agents](../chat-sdk-agents) plugin and create an agent with the **Chat SDK** harness. Buzz runs the bot as that agent and keeps the key and the community sign-in, so this works on hosted communities that require NIP-FI. The bot uses `createBuzzAdapter({ host: await connectStdioHost() })`.
+
+## Run it on this computer with its own key
 
 `provider/buzz-backend-chatsdk` gives a bot its own key and runs it as a systemd user service, `buzz-chatsdk-<first 16 hex of the pubkey>`. The key is saved in a 0600 file under `~/.config/buzz-chatsdk/agents` and reaches the bot by path.
 
@@ -68,7 +72,9 @@ The bot's key must be allowed on the relay. Either enroll it as a member of the 
 ln -s "$PWD/provider/buzz-backend-chatsdk.sh" ~/.local/bin/buzz-backend-chatsdk
 ```
 
-### Buzz 1.x
+### Buzz 1.x, communities without NIP-FI
+
+Hosted communities (`requires_nip_fi` in their relay info, such as `*.communities.buzz.xyz`) refuse a key that has only an ownership proof; use the plugin there.
 
 ```sh
 buzz-backend-chatsdk new Cards wss://<community relay>   # prints the bot's public key
