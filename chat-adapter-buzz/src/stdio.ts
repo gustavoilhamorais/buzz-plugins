@@ -33,6 +33,8 @@ export class StdioHost implements BuzzHost {
   private readonly stopListeners: (() => void)[] = [];
   private next = 1;
   private closed = false;
+  /** Called with a one-line summary of each message in and out, for debugging. */
+  trace: ((line: string) => void) | null = null;
 
   constructor(agent: StdioAgent, output: NodeJS.WritableStream) {
     this.pubkey = agent.pubkey;
@@ -68,6 +70,7 @@ export class StdioHost implements BuzzHost {
 
   /** Handles one message from the plugin. */
   handle(message: Record<string, unknown>): void {
+    this.trace?.(`in  ${summary(message)}`);
     if (message.type === "event" && isEvent(message.event)) {
       if (this.listeners.length) for (const listener of this.listeners) listener(message.event);
       else this.early.push(message.event);
@@ -92,6 +95,7 @@ export class StdioHost implements BuzzHost {
     const id = this.next++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
+      this.trace?.(`out ${summary({ type, id, ...body })}`);
       this.output.write(JSON.stringify({ buzz: PROTOCOL, type, id, ...body }) + "\n");
     });
   }
@@ -101,11 +105,16 @@ export class StdioHost implements BuzzHost {
  * Waits for the plugin's `start` and returns the host for that agent. Reads the
  * plugin's messages from `input` until it ends.
  */
-export function connectStdioHost(input: NodeJS.ReadableStream = process.stdin, output: NodeJS.WritableStream = process.stdout): Promise<StdioHost> {
+export function connectStdioHost(
+  input: NodeJS.ReadableStream = process.stdin,
+  output: NodeJS.WritableStream = process.stdout,
+  trace?: (line: string) => void,
+): Promise<StdioHost> {
   return new Promise((resolve, reject) => {
     let host: StdioHost | null = null;
     const lines = createInterface({ input, crlfDelay: Infinity });
     lines.on("line", (line) => {
+      if (!host) trace?.(`before start: ${line.slice(0, 300)}`);
       let message: Record<string, unknown>;
       try {
         message = JSON.parse(line) as Record<string, unknown>;
@@ -117,16 +126,30 @@ export function connectStdioHost(input: NodeJS.ReadableStream = process.stdin, o
         const agent = message.agent as StdioAgent | undefined;
         if (message.type !== "start" || !agent || !/^[0-9a-f]{64}$/.test(agent.pubkey ?? "")) return;
         host = new StdioHost(agent, output);
+        host.trace = trace ?? null;
         resolve(host);
         return;
       }
       host.handle(message);
     });
     lines.on("close", () => {
+      trace?.("input closed");
       if (host) host.stop();
       else reject(new Error("Buzz closed the connection before starting the bot"));
     });
   });
+}
+
+function summary(message: Record<string, unknown>): string {
+  const event = (message.event ?? message.value ?? message.template) as Partial<Event> | undefined;
+  const parts = [String(message.type)];
+  if (typeof message.id === "number") parts.push(`#${message.id}`);
+  if (message.ok === false) parts.push(`error=${String(message.error)}`);
+  if (event && typeof event === "object" && !Array.isArray(event))
+    parts.push(`kind=${event.kind} id=${event.id?.slice(0, 8) ?? "-"} by=${event.pubkey?.slice(0, 8) ?? "-"} tags=${JSON.stringify(event.tags ?? []).slice(0, 200)}`);
+  if (Array.isArray(message.value)) parts.push(`${message.value.length} events`);
+  if (message.filters) parts.push(JSON.stringify(message.filters).slice(0, 200));
+  return parts.join(" ");
 }
 
 function isEvent(value: unknown): value is Event {

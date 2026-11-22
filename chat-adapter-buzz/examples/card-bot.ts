@@ -6,7 +6,10 @@
 //   - From the chatsdk provider, with BUZZ_AGENT_CONFIG naming its saved identity.
 //   - By hand: BUZZ_RELAY_URL=wss://… BUZZ_PRIVATE_KEY=nsec1… BUZZ_AUTH_TAG='["auth",…]' node examples/card-bot.ts
 
-import { readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { format } from "node:util";
 import { createMemoryState } from "@chat-adapter/state-memory";
 import { Chat, type Message, type Thread } from "chat";
 import { createBuzzAdapter } from "../src/index.ts";
@@ -25,7 +28,32 @@ type AgentConfig = {
   publish_profile?: boolean;
 };
 
-const host = process.env.BUZZ_HOST === "stdio" ? await connectStdioHost() : null;
+// Under Buzz, stdout is the plugin's channel and stderr reaches only its memory,
+// so the bot logs to ~/.local/state/buzz-chatsdk/host.log.
+const log = process.env.BUZZ_HOST === "stdio" ? hostLog() : null;
+const host = log ? await connectStdioHost(process.stdin, process.stdout, (line) => log("wire", [line])) : null;
+if (host && log) log("info", [`started for ${host.name} ${host.pubkey} owned by ${host.owner}`]);
+
+function hostLog() {
+  const dir = join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "buzz-chatsdk");
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, "host.log");
+  const write = (level: string, args: unknown[]) => appendFileSync(file, `${new Date().toISOString()} [${process.pid}] ${level} ${format(...args)}\n`);
+  for (const level of ["log", "info", "warn", "error", "debug"] as const) console[level] = (...args: unknown[]) => write(level, args);
+  process.on("uncaughtException", (error) => {
+    write("fatal", [error]);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (error) => write("unhandled", [error]));
+  process.on("exit", (code) => write("exit", [code]));
+  process.on("SIGTERM", () => {
+    write("signal", ["SIGTERM"]);
+    process.exit(0);
+  });
+  write("boot", [`node ${process.version} in ${process.cwd()}`]);
+  return write;
+}
+
 const config: AgentConfig = host
   ? { name: host.name ?? "Cards", relay_url: "", private_key_nsec: "", respond_to: process.env.BUZZ_RESPOND_TO === "anyone" ? "anyone" : "owner-only" }
   : process.env.BUZZ_AGENT_CONFIG
@@ -127,5 +155,5 @@ await chat.initialize();
 console.log(`${name} is listening as ${adapter.botUserId} in ${adapter.listening.length} channel(s)`);
 
 const stop = () => void chat.shutdown().finally(() => process.exit(0));
-for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, stop);
+for (const signal of ["SIGINT", "SIGTERM"] as const) if (!host || signal === "SIGINT") process.on(signal, stop);
 host?.onStop(stop);

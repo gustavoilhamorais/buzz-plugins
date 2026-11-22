@@ -42,12 +42,12 @@ export function apply(ctx) {
     return bot;
   };
 
+  // Bots start with their agent's first delivery, never while Buzz is still
+  // creating and enrolling the agent; this only stops bots of removed agents.
   const sync = () => {
     const snapshot = agents.snapshot?.();
     if (!snapshot || snapshot.status === "loading") return;
-    const mine = (snapshot.running ?? []).filter((agent) => agent.type === typeKey);
-    const keys = new Set(mine.map((agent) => agent.key));
-    for (const agent of mine) botFor(agent);
+    const keys = new Set((snapshot.running ?? []).filter((agent) => agent.type === typeKey).map((agent) => agent.key));
     for (const [key, bot] of bots) {
       if (keys.has(key)) continue;
       bots.delete(key);
